@@ -1,29 +1,28 @@
-import { useState, useEffect } from "react";
-import {
-  collection, query, where, onSnapshot,
-  addDoc, updateDoc, doc, serverTimestamp,
-} from "firebase/firestore";
+import { useState, useEffect, useRef } from "react";
+import { collection, query, where, onSnapshot, addDoc, updateDoc, doc, serverTimestamp } from "firebase/firestore";
 import { db } from "../firebase";
-import { Icon, Icons } from "./globals";
+import { Icon, Icons, Donut, Spinner, useToast } from "./globals";
 
-const MUSCLE_COLORS = {
+const MUSCLE_COLORS: Record<string, string> = {
   Chest:     "var(--red)",
   Shoulders: "var(--amber)",
   Triceps:   "var(--accent2)",
   Back:      "var(--blue)",
   Biceps:    "var(--green)",
   Legs:      "var(--green)",
+  Core:      "var(--amber)",
 };
 
-/**
- * Workouts page — display & interact with the current AI-generated workout plan.
- *
- * Props:
- *   profile — UserProfile object
- */
-export default function Workouts({ profile }) {
-  const [plan,    setPlan]    = useState(null);
+export default function Workouts({ profile, setProfile }: { profile: any; setProfile: (p: any) => void }) {
+  const toast = useToast();
+  const [plan,    setPlan]    = useState<any>(null);
   const [loading, setLoading] = useState(false);
+  const [expanded, setExpanded] = useState<number | null>(null);
+
+  // Rest timer
+  const [timer,     setTimer]    = useState(0);
+  const [timerOn,   setTimerOn]  = useState(false);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     const q = query(collection(db, "workouts"), where("userId", "==", profile.uid));
@@ -32,102 +31,125 @@ export default function Workouts({ profile }) {
     });
   }, [profile.uid]);
 
-  // ── Generate plan (calls your secure backend) ──
+  useEffect(() => {
+    if (timerOn) {
+      timerRef.current = setInterval(() => setTimer(t => t + 1), 1000);
+    } else {
+      clearInterval(timerRef.current!);
+    }
+    return () => clearInterval(timerRef.current!);
+  }, [timerOn]);
+
+  const fmtTime = (s: number) => `${String(Math.floor(s/60)).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`;
+
   const generatePlan = async () => {
     setLoading(true);
     try {
       const res = await fetch("/api/ai/generate-workout", {
-        method:  "POST",
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ userData: profile }),
+        body: JSON.stringify({ userData: profile }),
       });
       if (!res.ok) throw new Error("Server error");
       const data = await res.json();
-
+      if (!data.exercises?.length) throw new Error("No exercises returned");
       await addDoc(collection(db, "workouts"), {
         userId:    profile.uid,
         planName:  data.planName || "AI Custom Plan",
-        exercises: data.exercises.map(ex => ({ ...ex, completed: false })),
+        exercises: (data.exercises as any[]).map(ex => ({ ...ex, completed: false })),
         createdAt: serverTimestamp(),
       });
-    } catch (err) {
-      console.error(err);
-      alert("Failed to generate plan. Check the console for details.");
+      toast("Workout plan generated!", "success");
+    } catch {
+      toast("Failed to generate plan. Please try again.", "error");
     } finally {
       setLoading(false);
     }
   };
 
-  const toggleExercise = async (index) => {
+  const toggleExercise = async (index: number) => {
     if (!plan) return;
-    const updated = [...plan.exercises];
-    const isNowDone = !updated[index].completed;
-    updated[index] = { ...updated[index], completed: isNowDone };
-    
-    // Update the workout document
+    const updated = plan.exercises.map((ex: any, i: number) =>
+      i === index ? { ...ex, completed: !ex.completed } : ex
+    );
+    const isNowDone = updated[index].completed;
     await updateDoc(doc(db, "workouts", plan.id), { exercises: updated });
-    setPlan(prev => ({ ...prev, exercises: updated }));
+    setPlan((prev: any) => ({ ...prev, exercises: updated }));
 
-    // Award XP and Level up if the exercise was just checked off
     if (isNowDone) {
-      const currentXp = profile.xp || 0;
-      const newXp = currentXp + 10;
-      const newLevel = Math.floor(newXp / 100) + 1; // 1 level per 100 XP
-      
-      await updateDoc(doc(db, "users", profile.uid), {
-        xp: newXp,
-        level: newLevel
-      });
+      const newXp    = (profile.xp ?? 0) + 10;
+      const newLevel = Math.floor(newXp / 100) + 1;
+      await updateDoc(doc(db, "users", profile.uid), { xp: newXp, level: newLevel });
+      setProfile({ ...profile, xp: newXp, level: newLevel });
+      toast(`+10 XP! ${newXp % 100}/100 to next level`, "success");
     }
   };
 
-  const doneCount = plan?.exercises.filter(e => e.completed).length ?? 0;
-  const total     = plan?.exercises.length ?? 0;
+  const doneCount = plan?.exercises?.filter((e: any) => e.completed).length ?? 0;
+  const total     = plan?.exercises?.length ?? 0;
   const pct       = total > 0 ? Math.round((doneCount / total) * 100) : 0;
+  const muscles   = plan ? [...new Set<string>(plan.exercises.map((e: any) => e.muscle))] : [];
 
   return (
     <div className="page" style={{ display: "flex", flexDirection: "column", gap: 28 }}>
 
       {/* ── Header ── */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
         <div>
           <p className="label" style={{ marginBottom: 4 }}>Training</p>
           <h1>Gym Plan</h1>
         </div>
         {plan && (
-          <button className="btn btn-secondary btn-sm" onClick={generatePlan} disabled={loading} style={{ gap: 8 }}>
+          <button className="btn btn-secondary btn-sm" onClick={generatePlan} disabled={loading}>
             <Icon d={Icons.refresh} size={15} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} />
-            {loading ? "Generating..." : "New Plan"}
+            {loading ? "Generating…" : "New Plan"}
           </button>
         )}
       </div>
 
+      {/* ── Rest timer ── */}
+      <div className="card card-sm" style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <Icon d={Icons.tracking} size={18} style={{ color: "var(--blue)" }} />
+          <span style={{ fontFamily: "var(--font-display)", fontWeight: 700, fontSize: 22, color: timerOn ? "var(--blue)" : "var(--text)" }}>
+            {fmtTime(timer)}
+          </span>
+          <span className="dimmer" style={{ fontSize: 13 }}>rest timer</span>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginLeft: "auto" }}>
+          <button className="btn btn-secondary btn-sm" onClick={() => setTimerOn(t => !t)}>
+            {timerOn ? "Pause" : "Start"}
+          </button>
+          <button className="btn btn-ghost btn-sm" onClick={() => { setTimer(0); setTimerOn(false); }}>Reset</button>
+        </div>
+      </div>
+
       {/* ── Empty state ── */}
       {!plan && (
-        <div className="card" style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", padding: 48, gap: 20 }}>
-          <div style={{ width: 80, height: 80, borderRadius: "50%", background: "var(--accent-glow)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <Icon d={Icons.dumbbell} size={36} style={{ color: "var(--accent2)" }} />
+        <div className="card" style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", padding: "56px 24px", gap: 20 }}>
+          <div style={{ width: 88, height: 88, borderRadius: "50%", background: "var(--accent-glow)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Icon d={Icons.dumbbell} size={40} style={{ color: "var(--accent2)" }} />
           </div>
           <div>
             <h2 style={{ marginBottom: 8 }}>No Active Plan</h2>
-            <p className="muted" style={{ maxWidth: 300 }}>Let our AI generate a personalised workout plan based on your level and goals.</p>
+            <p className="muted" style={{ maxWidth: 320, lineHeight: 1.7 }}>
+              Let our AI generate a personalised workout plan based on your fitness level (<strong style={{ color: "var(--text)" }}>{profile.gymLevel}</strong>) and goal (<strong style={{ color: "var(--text)" }}>{profile.goal}</strong>).
+            </p>
           </div>
           <button className="btn btn-primary" onClick={generatePlan} disabled={loading} style={{ gap: 8 }}>
-            {loading
-              ? <><span style={{ display: "inline-block", width: 16, height: 16, border: "2px solid rgba(255,255,255,0.3)", borderTopColor: "white", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} /> Generating...</>
-              : <><Icon d={Icons.sparkle} size={16} /> Generate My Plan</>}
+            {loading ? <><Spinner size={16} /> Generating…</> : <><Icon d={Icons.sparkle} size={16} /> Generate My Plan</>}
           </button>
         </div>
       )}
 
-      {/* ── Plan hero ── */}
       {plan && (
         <>
-          <div className="card glow-card" style={{ display: "flex", gap: 20, alignItems: "center" }}>
+          {/* ── Plan hero ── */}
+          <div className="card glow-card" style={{ display: "flex", gap: 20, alignItems: "center", flexWrap: "wrap" }}>
             <div style={{ width: 72, height: 72, borderRadius: 20, background: "var(--accent-glow)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
               <Icon d={Icons.dumbbell} size={32} style={{ color: "var(--accent2)" }} />
             </div>
-            <div style={{ flex: 1 }}>
+            <div style={{ flex: 1, minWidth: 180 }}>
               <h2 style={{ marginBottom: 4 }}>{plan.planName}</h2>
               <p className="muted" style={{ fontSize: 13 }}>Level: {profile.gymLevel} · {total} exercises</p>
               <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 12 }}>
@@ -138,28 +160,57 @@ export default function Workouts({ profile }) {
               </div>
             </div>
             <div style={{ textAlign: "right", flexShrink: 0 }}>
-              <p style={{ fontFamily: "var(--font-display)", fontWeight: 800, fontSize: 36, color: pct === 100 ? "var(--green)" : "var(--accent2)" }}>{pct}%</p>
-              <p className="label">complete</p>
+              <p style={{ fontFamily: "var(--font-display)", fontWeight: 800, fontSize: 40, color: pct === 100 ? "var(--green)" : "var(--accent2)", lineHeight: 1 }}>{pct}%</p>
+              <p className="label" style={{ marginTop: 4 }}>complete</p>
             </div>
+          </div>
+
+          {/* ── Muscle group chips ── */}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {muscles.map(m => {
+              const mc = MUSCLE_COLORS[m] ?? "var(--accent)";
+              const count = plan.exercises.filter((e: any) => e.muscle === m).length;
+              return (
+                <div key={m} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: "var(--r)", background: `color-mix(in srgb, ${mc} 12%, transparent)`, border: `1px solid color-mix(in srgb, ${mc} 25%, transparent)` }}>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: mc }}>{m}</span>
+                  <span className="dimmer" style={{ fontSize: 11 }}>×{count}</span>
+                </div>
+              );
+            })}
           </div>
 
           {/* ── Exercise list ── */}
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {plan.exercises.map((ex, i) => {
+            {plan.exercises.map((ex: any, i: number) => {
               const mc = MUSCLE_COLORS[ex.muscle] ?? "var(--accent)";
+              const isExpanded = expanded === i;
               return (
-                <div key={i} className={`ex-row ${ex.completed ? "done" : ""}`} onClick={() => toggleExercise(i)}>
-                  <div style={{ width: 32, height: 32, borderRadius: 10, background: `${mc}22`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                    <span style={{ fontSize: 11, fontWeight: 700, color: mc }}>{ex.muscle?.slice(0, 3).toUpperCase()}</span>
+                <div key={i}>
+                  <div
+                    className={`ex-row ${ex.completed ? "done" : ""}`}
+                    onClick={() => setExpanded(isExpanded ? null : i)}
+                    style={{ background: isExpanded ? "var(--bg3)" : "var(--bg2)" }}
+                  >
+                    <div style={{ width: 36, height: 36, borderRadius: 10, background: `color-mix(in srgb, ${mc} 15%, transparent)`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: mc }}>{ex.muscle?.slice(0, 3).toUpperCase()}</span>
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <p style={{ fontWeight: 500, marginBottom: 2 }}>{ex.name}</p>
+                      <p className="dimmer" style={{ fontSize: 12 }}>{ex.sets} sets × {ex.reps} reps</p>
+                    </div>
+                    <Icon d={Icons.chevDown} size={16} style={{ color: "var(--text3)", transition: "transform 0.2s", transform: isExpanded ? "rotate(180deg)" : "none" }} />
+                    <div
+                      className={`ex-check ${ex.completed ? "done" : ""}`}
+                      onClick={e => { e.stopPropagation(); toggleExercise(i); }}
+                    >
+                      {ex.completed && <Icon d={Icons.check} size={16} style={{ color: "white" }} />}
+                    </div>
                   </div>
-                  <div style={{ flex: 1 }}>
-                    <p style={{ fontWeight: 500, marginBottom: 2 }}>{ex.name}</p>
-                    <p className="dimmer" style={{ fontSize: 12 }}>{ex.sets} sets × {ex.reps} reps</p>
-                  </div>
-                  <span className="badge" style={{ background: `${mc}22`, color: mc, fontSize: 11 }}>{ex.muscle}</span>
-                  <div className={`ex-check ${ex.completed ? "done" : ""}`}>
-                    {ex.completed && <Icon d={Icons.check} size={16} style={{ color: "white" }} />}
-                  </div>
+                  {isExpanded && (
+                    <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderTop: "none", borderRadius: "0 0 var(--r) var(--r)", padding: "14px 20px", animation: "fadeIn 0.2s ease" }}>
+                      <p style={{ fontSize: 13, color: "var(--text2)", lineHeight: 1.7 }}>{ex.description}</p>
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -167,32 +218,14 @@ export default function Workouts({ profile }) {
 
           {/* ── Completion celebration ── */}
           {doneCount === total && total > 0 && (
-            <div className="card" style={{ textAlign: "center", padding: 32, background: "var(--green2)", borderColor: "rgba(62,207,142,0.25)" }}>
-              <p style={{ fontSize: 36, marginBottom: 8 }}>🎉</p>
+            <div className="card" style={{ textAlign: "center", padding: "40px 32px", background: "var(--green2)", borderColor: "rgba(62,207,142,0.25)", animation: "scaleIn 0.4s cubic-bezier(0.34,1.56,0.64,1)" }}>
+              <p style={{ fontSize: 44, marginBottom: 12 }}>🎉</p>
               <h2 style={{ color: "var(--green)", marginBottom: 8 }}>Workout Complete!</h2>
-              <p className="muted">You crushed it. Rest up and come back stronger.</p>
+              <p className="muted">You crushed every set. Rest up and come back stronger tomorrow.</p>
             </div>
           )}
-
-          {/* ── Muscle groups summary ── */}
-          <div className="card">
-            <h2 style={{ marginBottom: 16 }}>Muscle Groups Today</h2>
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-              {[...new Set(plan.exercises.map(e => e.muscle))].map(m => {
-                const mc = MUSCLE_COLORS[m] ?? "var(--accent)";
-                return (
-                  <div key={m} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 14px", borderRadius: "var(--r)", background: `${mc}15`, border: `1px solid ${mc}30` }}>
-                    <span style={{ fontSize: 13, fontWeight: 500, color: mc }}>{m}</span>
-                    <span className="dimmer" style={{ fontSize: 12 }}>× {plan.exercises.filter(e => e.muscle === m).length}</span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
         </>
       )}
-
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   );
 }
