@@ -1,0 +1,8 @@
+{
+  "name": "AI LifeOS",
+  "description": "A comprehensive AI-powered life management system for health, fitness, and productivity with personalized onboarding and real-time tracking.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
